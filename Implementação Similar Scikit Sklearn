@@ -1,0 +1,162 @@
+# ============================================================
+#  Modelos Lineares — Comparação entre Implementações
+#  (OLS, Ridge, Lasso, Elastic Net) — Manual × scikit-learn
+# ============================================================
+
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.linear_model import LinearRegression, Ridge, Lasso, ElasticNet
+from sklearn.metrics import mean_squared_error
+from sklearn.model_selection import train_test_split
+
+# ------------------------------------------------------------
+# Funções utilitárias
+# ------------------------------------------------------------
+def mse(y_true, y_pred):
+    return np.mean((y_true - y_pred) ** 2)
+
+def soft_threshold(rho, lam):
+    if rho > lam:
+        return rho - lam
+    elif rho < -lam:
+        return rho + lam
+    else:
+        return 0.0
+
+# ------------------------------------------------------------
+# Modelos manuais
+# ------------------------------------------------------------
+def ols_normal_eq(X, y):
+    Xc = np.hstack([np.ones((X.shape[0], 1)), X])
+    XtX = Xc.T @ Xc
+    try:
+        beta = np.linalg.solve(XtX, Xc.T @ y)
+    except np.linalg.LinAlgError:
+        beta = np.linalg.pinv(XtX) @ Xc.T @ y
+    return beta
+
+def ridge_closed_form(X, y, alpha=1.0):
+    Xc = np.hstack([np.ones((X.shape[0], 1)), X])
+    p = Xc.shape[1]
+    I = np.eye(p)
+    I[0, 0] = 0
+    return np.linalg.inv(Xc.T @ Xc + alpha * I) @ (Xc.T @ y)
+
+def lasso_coordinate_descent(X, y, alpha=0.1, n_iter=1000, tol=1e-6):
+    X_mean, y_mean = X.mean(axis=0), y.mean()
+    Xc, yc = X - X_mean, y - y_mean
+    n, p = X.shape
+    beta = np.zeros(p)
+    for _ in range(n_iter):
+        beta_old = beta.copy()
+        for j in range(p):
+            r_j = yc - Xc @ beta + Xc[:, j] * beta[j]
+            rho = np.dot(Xc[:, j], r_j)
+            z = np.dot(Xc[:, j], Xc[:, j])
+            beta[j] = soft_threshold(rho, alpha * n) / z
+        if np.max(np.abs(beta - beta_old)) < tol:
+            break
+    intercept = y_mean - np.dot(X_mean, beta)
+    return intercept, beta
+
+def elastic_net_cd_sklearn_like(X, y, alpha=0.1, l1_ratio=0.5, n_iter=10000, tol=1e-6):
+    """Elastic Net 100% compatível com scikit-learn"""
+    X = np.asarray(X, dtype=float)
+    y = np.asarray(y, dtype=float)
+    n_samples, n_features = X.shape
+    X_mean = X.mean(axis=0)
+    y_mean = y.mean()
+    Xc = X - X_mean
+    yc = y - y_mean
+    w = np.zeros(n_features)
+    alpha_scaled = alpha * n_samples
+    for _ in range(n_iter):
+        w_old = w.copy()
+        for j in range(n_features):
+            r_j = yc - Xc @ w + Xc[:, j] * w[j]
+            rho = np.dot(Xc[:, j], r_j)
+            z = np.dot(Xc[:, j], Xc[:, j]) + alpha_scaled * (1 - l1_ratio)
+            w[j] = soft_threshold(rho, alpha_scaled * l1_ratio) / z
+        if np.max(np.abs(w - w_old)) < tol:
+            break
+    intercept = y_mean - np.dot(X_mean, w)
+    return intercept, w
+
+# ------------------------------------------------------------
+# Geração de dados simulados
+# ------------------------------------------------------------
+np.random.seed(42)
+n_samples, n_features = 200, 8
+X = np.random.randn(n_samples, n_features)
+true_coef = np.array([1.5, 0.0, -2.0, 0.0, 3.0, 0.0, 0.5, 0.0])
+y = X @ true_coef + 0.5 * np.random.randn(n_samples)
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=123)
+
+# ------------------------------------------------------------
+# Treinamento manual
+# ------------------------------------------------------------
+beta_ols = ols_normal_eq(X_train, y_train)
+beta_ridge = ridge_closed_form(X_train, y_train, alpha=1.0)
+inter_lasso, coef_lasso = lasso_coordinate_descent(X_train, y_train, alpha=0.1)
+inter_en, coef_en = elastic_net_cd_sklearn_like(X_train, y_train, alpha=0.2, l1_ratio=0.7)
+
+X_test1 = np.hstack([np.ones((X_test.shape[0],1)), X_test])
+y_pred_ols = X_test1 @ beta_ols
+y_pred_ridge = X_test1 @ beta_ridge
+y_pred_lasso = inter_lasso + X_test @ coef_lasso
+y_pred_en = inter_en + X_test @ coef_en
+
+mse_manual = {
+    'OLS_manual': mse(y_test, y_pred_ols),
+    'Ridge_manual': mse(y_test, y_pred_ridge),
+    'Lasso_manual': mse(y_test, y_pred_lasso),
+    'ElasticNet_manual': mse(y_test, y_pred_en)
+}
+
+# ------------------------------------------------------------
+# Treinamento com scikit-learn
+# ------------------------------------------------------------
+models = {
+    'OLS_skl': LinearRegression(),
+    'Ridge_skl': Ridge(alpha=1.0),
+    'Lasso_skl': Lasso(alpha=0.1, max_iter=10000),
+    'ElasticNet_skl': ElasticNet(alpha=0.2, l1_ratio=0.7, max_iter=10000)
+}
+mse_skl, coefs_skl = {}, {}
+for name, model in models.items():
+    model.fit(X_train, y_train)
+    y_pred = model.predict(X_test)
+    mse_skl[name] = mean_squared_error(y_test, y_pred)
+    coefs_skl[name] = model.coef_
+
+# ------------------------------------------------------------
+# Visualização dos resultados
+# ------------------------------------------------------------
+plt.figure(figsize=(12,5))
+
+plt.subplot(1,2,1)
+plt.plot(true_coef, 'ko--', label='Verdadeiro')
+plt.plot(beta_ols[1:], 'o-', label='OLS_manual')
+plt.plot(beta_ridge[1:], 's-', label='Ridge_manual')
+plt.plot(coef_lasso, 'x-', label='Lasso_manual')
+plt.plot(coef_en, 'd-', label='ElasticNet_manual')
+plt.title('Coeficientes estimados — Implementações Manuais')
+plt.xlabel('Índice')
+plt.legend()
+
+plt.subplot(1,2,2)
+labels = list(mse_manual.keys()) + list(mse_skl.keys())
+values = list(mse_manual.values()) + list(mse_skl.values())
+plt.barh(labels, values)
+plt.title('Erro Quadrático Médio (MSE)')
+plt.tight_layout()
+plt.show()
+
+# ------------------------------------------------------------
+# Comparação numérica (Elastic Net)
+# ------------------------------------------------------------
+print("=== Comparação Elastic Net (manual × sklearn) ===")
+print("Diferença média dos coeficientes:",
+      np.mean(np.abs(coef_en - coefs_skl['ElasticNet_skl'])))
+print("Intercepto manual:", inter_en)
+print("Intercepto sklearn:", models['ElasticNet_skl'].intercept_)
